@@ -70,10 +70,11 @@ func init() {
 
 // DiscoveryServer is Pilot's gRPC implementation for Envoy's v2 xds APIs
 type DiscoveryServer struct {
-	// Env is the model environment.
+	// Env is the model environment. pilot server 中的 Environment
 	Env *model.Environment
 
 	// MemRegistry is used for debug and load testing, allow adding services. Visible for testing.
+	// 控制面 Istio 配置的生成器，如 VirtualService、DestinationService 等
 	MemRegistry *memory.ServiceDiscovery
 
 	// MemRegistry is used for debug and load testing, allow adding services. Visible for testing.
@@ -88,6 +89,7 @@ type DiscoveryServer struct {
 	// default generator, or the combination of Generator metadata and TypeUrl to select a
 	// different generator for a type.
 	// Normal istio clients use the default generator - will not be impacted by this.
+	// 针对不同配置类型的定制化生成器
 	Generators map[string]model.XdsResourceGenerator
 
 	concurrentPushLimit chan struct{}
@@ -102,32 +104,41 @@ type DiscoveryServer struct {
 
 	// EndpointShards for a service. This is a global (per-server) list, built from
 	// incremental updates. This is keyed by service and namespace
+	// 不同服务所有实例的集合，增量更新，key 为 service 和 namespace
+	// EndpointShards 中是以不同的注册中心名为 key 分组保存实例
 	EndpointShardsByService map[string]map[string]*EndpointShards
 
+	// 接受 push 请求的 channel
 	pushChannel chan *model.PushRequest
 
 	// mutex used for config update scheduling (former cache update mutex)
 	updateMutex sync.RWMutex
 
 	// pushQueue is the buffer that used after debounce and before the real xds push.
+	// 防抖之后，真正 Push xDS 之前所用的缓冲队列
 	pushQueue *PushQueue
 
 	// debugHandlers is the list of all the supported debug handlers.
 	debugHandlers map[string]string
 
 	// adsClients reflect active gRPC channels, for both ADS and EDS.
+	// ADS（强一致性的 xDS） 和 EDS（Endpoint Discovery Service） 的 grpc 连接
 	adsClients      map[string]*Connection
 	adsClientsMutex sync.RWMutex
 
+	// 监听 xDS ACK 和连接断开
 	StatusReporter DistributionStatusCache
 
 	// Authenticators for XDS requests. Should be same/subset of the CA authenticators.
 	Authenticators []authenticate.Authenticator
 
 	// InternalGen is notified of connect/disconnect/nack on all connections
+	// xDS 状态更新的生成器（更新 connect, disconnect, nacks, acks）
+	// 状态更新后向所有 connection 推送 DiscoveryResponse
 	InternalGen *InternalGen
 
 	// serverReady indicates caches have been synced up and server is ready to process requests.
+	// 表示缓存已同步，server 可以接受请求
 	serverReady bool
 }
 

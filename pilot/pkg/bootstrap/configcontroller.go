@@ -126,6 +126,7 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 	}
 
 	// Wrap the config controller with a cache.
+	// 将所有的 ConfigStore 聚合并缓存
 	aggregateConfigController, err := configaggregate.MakeCache(s.ConfigStores)
 	if err != nil {
 		return err
@@ -133,9 +134,12 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 	s.configController = aggregateConfigController
 
 	// Create the config store.
+	// 通过 s.configController 统一操作上面聚合的 ConfigStores
 	s.environment.IstioConfigStore = model.MakeIstioStore(s.configController)
 
 	// Defer starting the controller until after the service is created.
+	// 将其包装为 IstioConfigStore 传入 environment，便于操作 ServiceEntry/Gateway 等资源
+	// IstioConfigStore 会在之后的 ServiceEntryStore 中用到
 	s.addStartFunc(func(stop <-chan struct{}) error {
 		go s.configController.Run(stop)
 		return nil
@@ -145,6 +149,7 @@ func (s *Server) initConfigController(args *PilotArgs) error {
 }
 
 func (s *Server) initK8SConfigStore(args *PilotArgs) error {
+	// 初始化了一个处理 Istio CRDs 的 Client ，实现 ConfigStoreCache 这个接口中增删改查等方法
 	configController, err := s.makeKubeConfigController(args)
 	if err != nil {
 		return err
@@ -158,6 +163,7 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 			return err
 		}
 	}
+	// 初始化 StatusReporter
 	s.initStatusController(args, features.EnableStatus)
 	return nil
 }

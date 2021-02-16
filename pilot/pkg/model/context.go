@@ -47,12 +47,15 @@ var _ mesh.NetworksHolder = &Environment{}
 // Environment provides an aggregate environmental API for Pilot
 type Environment struct {
 	// Discovery interface for listing services and instances.
+	// 服务发现的接口，主要列出 services 和 instances
 	ServiceDiscovery
 
 	// Config interface for listing routing rules
+	// Istio 配置文件的存储器，主要列出 ServiceEntry 等配置
 	IstioConfigStore
 
 	// Watcher is the watcher for the mesh config (to be merged into the config store)
+	// mesh config 文件的监听器
 	mesh.Watcher
 
 	// NetworksWatcher (loaded from a config map) provides information about the
@@ -60,6 +63,7 @@ type Environment struct {
 	// network. Each network provides information about the endpoints in a
 	// routable L3 network. A single routable L3 network can have one or more
 	// service registries.
+	// mesh network config 文件的监听器
 	mesh.NetworksWatcher
 
 	// PushContext holds informations during push generation. It is reset on config change, at the beginning
@@ -68,9 +72,18 @@ type Environment struct {
 	// ALL USE DURING A PUSH SHOULD USE THE ONE CREATED AT THE
 	// START OF THE PUSH, THE GLOBAL ONE MAY CHANGE AND REFLECT A DIFFERENT
 	// CONFIG AND PUSH
+
+	/*
+		在推送（下发 xDS）生成期间保存信息的上下文
+		PushContext 是 Pilot 在推送 xDS 前，生成配置期间保存相关信息的上下文的地方，在全量推送配置和配置发生改变时重置。
+		它会保存所有的错误和统计信息，并缓存一些配置的计算信息。 ServiceDiscovery 提供了枚举 Istio 中服务和实例的方法。
+		mesh.Watcher 和 mesh.NetworksWatcher 负责监听 istiod 启动时挂载的两个配置文件，这两个配置文件是通过 configmap
+		映射到 Pod 的文件系统中的，监听器将在监听到配置文件变化时运行预先注册的 Handler 。
+	*/
 	PushContext *PushContext
 
 	// DomainSuffix provides a default domain for the Istio server.
+	// istio server 默认的后缀域名
 	DomainSuffix string
 }
 

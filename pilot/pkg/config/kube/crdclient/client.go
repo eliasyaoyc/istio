@@ -73,6 +73,7 @@ type Client struct {
 	revision string
 
 	// kinds keeps track of all cache handlers for known types
+	// 跟踪已知类型的所有缓存 handler
 	kinds map[resource.GroupVersionKind]*cacheHandler
 	queue queue.Instance
 

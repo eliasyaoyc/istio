@@ -114,18 +114,24 @@ type Server struct {
 	MonitorListeningAddr net.Addr
 
 	// TODO(nmittler): Consider alternatives to exposing these directly
+	// xds 服务
 	EnvoyXdsServer *xds.DiscoveryServer
 
-	clusterID   string
+	clusterID string
+	// Pilot 环境所需的 API 集合
 	environment *model.Environment
 
 	kubeRestConfig *rest.Config
 	kubeClient     kubelib.Client
-	kubeRegistry   *kubecontroller.Controller
-	multicluster   *kubecontroller.Multicluster
-
-	configController  model.ConfigStoreCache
-	ConfigStores      []model.ConfigStoreCache
+	// 处理 Kubernetes 主集群的注册中心
+	kubeRegistry *kubecontroller.Controller
+	// 处理 Kubernetes 多个集群的注册中心
+	multicluster *kubecontroller.Multicluster
+	// 统一处理配置数据（如 VirtualService、DestinationService等）的 Controller
+	configController model.ConfigStoreCache
+	// 不同配置信息的缓存器，提供 Get、List、Create 等方法
+	ConfigStores []model.ConfigStoreCache
+	// 单独处理 ServiceEntry 的 Controller
 	serviceEntryStore *serviceentry.ServiceEntryStore
 
 	httpServer       *http.Server // debug, monitoring and readiness Server.
@@ -146,6 +152,7 @@ type Server struct {
 	IstioDNSServer *dns.IstioDNS
 
 	// fileWatcher used to watch mesh config, networks and certificates.
+	// 文件监听器，主要 watch meshconfig 和 networks 配置文件等
 	fileWatcher filewatcher.FileWatcher
 
 	certController *chiron.WebhookController
@@ -157,6 +164,7 @@ type Server struct {
 	jwtPath      string
 
 	// startFuncs keeps track of functions that need to be executed when Istiod starts.
+	// 保存了所有服务的启动函数，便于在 Start（） 方法中批量启动及管理
 	startFuncs []startFunc
 	// requiredTerminations keeps track of components that should block server exit
 	// if they are not stopped. This allows important cleanup tasks to be completed.
@@ -183,7 +191,7 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	s := &Server{
 		clusterID:       getClusterID(args),
 		environment:     e,
-		EnvoyXdsServer:  xds.NewDiscoveryServer(e, args.Plugins),
+		EnvoyXdsServer:  xds.NewDiscoveryServer(e, args.Plugins), // 初始化 XDSServer
 		fileWatcher:     filewatcher.NewWatcher(),
 		httpMux:         http.NewServeMux(),
 		readinessProbes: make(map[string]readinessProbe),
@@ -203,6 +211,10 @@ func NewServer(args *PilotArgs) (*Server, error) {
 
 	prometheus.EnableHandlingTimeHistogram()
 
+	/*
+		initMeshConfiguration 和 initMeshNetworks 都是通过 fileWatcher 对 istiod 从 configmap 中挂载的两个配置文件 mesh 和 meshNetworks 进行监听
+		github.com/istio/pkg/filewatcher ，底层使用到了 fsnotify 这个库来推送文件变化事件。
+	*/
 	s.initMeshConfiguration(args, s.fileWatcher)
 
 	// Apply the arguments to the configuration.
@@ -211,6 +223,7 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	}
 
 	s.initMeshNetworks(args, s.fileWatcher)
+	// initMeshHandlers 为上述两个配置文件注册了两个 Handler ，当配置文件发生变化时触发全量 xDS 下发。
 	s.initMeshHandlers()
 
 	// Parse and validate Istiod Address.
@@ -219,6 +232,7 @@ func NewServer(args *PilotArgs) (*Server, error) {
 		return nil, err
 	}
 
+	// 核心：初始化了 三种控制器(证书处理、配置信息和注册信息)
 	if err := s.initControllers(args); err != nil {
 		return nil, err
 	}
@@ -267,9 +281,12 @@ func NewServer(args *PilotArgs) (*Server, error) {
 		return nil, fmt.Errorf("error initializing debug server: %v", err)
 	}
 	// This should be called only after controllers are initialized.
+	// 初始化三个事件处理器 serviceHandler、instanceHandler 和 configHandler 分别响应、实例和配置数据的更新事件
 	if err := s.initRegistryEventHandlers(); err != nil {
 		return nil, fmt.Errorf("error initializing handlers: %v", err)
 	}
+
+	// 这里初始化 EnvoyXdsServer 和 gRPC 服务器，并注册 xDS V2 和 xDS V3 的 ADS 服务到 gRPC 服务器上
 	if err := s.initDiscoveryService(args); err != nil {
 		return nil, fmt.Errorf("error initializing discovery service: %v", err)
 	}
@@ -742,12 +759,14 @@ func (s *Server) initRegistryEventHandlers() error {
 			}: {}},
 			Reason: []model.TriggerReason{model.ServiceUpdate},
 		}
+		// 当服务本身发生变化时，会触发 xDS 的全量下发，所有与该服务相关的代理都会收到推送。
 		s.EnvoyXdsServer.ConfigUpdate(pushReq)
 	}
 	if err := s.ServiceController().AppendServiceHandler(serviceHandler); err != nil {
 		return fmt.Errorf("append service handler failed: %v", err)
 	}
 
+	// 实例的变动也会触发 xDS 的全量下发，不过仅在连接 Consul 时生效。Kubernetes 和 MCP 这两种服务发现的场景下，更新事件的 Handler 是在别的地方注册的。
 	instanceHandler := func(si *model.ServiceInstance, _ model.Event) {
 		// TODO: This is an incomplete code. This code path is called for consul, etc.
 		// In all cases, this is simply an instance update and not a config update. So, we need to update
@@ -773,6 +792,9 @@ func (s *Server) initRegistryEventHandlers() error {
 		}
 	}
 
+	// 上一步初始化了 configController，它操作的对象主要是像  VirtualService、DestinationRules 这些 Istio 定义的配置
+	// 这些配置的变化也会触发 xDS 的全量下发，所有与该配置相关的代理都会收到推送。不过 ServiceEntry 和 WorkloadEntry 除外，
+	// 这两个资源的配置下发是由 ServiceEntryStore 管理的，之前在初始化 ServiceController 时定义的 s.serviceEntryStore 会处理，
 	if s.configController != nil {
 		configHandler := func(_, curr model.Config, event model.Event) {
 			pushReq := &model.PushRequest{
@@ -994,6 +1016,10 @@ func (s *Server) initControllers(args *PilotArgs) error {
 	if err := s.initCertController(args); err != nil {
 		return fmt.Errorf("error initializing certificate controller: %v", err)
 	}
+	/*
+		配置信息一般是 Istio 定义的 CRD (CustomResourceDefinitions即自定义资源 如 VirtualService、DestinationRules等)，
+		一个控制面可以通过 MCP 同时接入多个 Kubernetes 之外的配置数据源，也可通过文件目录（主要用来调试）挂载，默认读取Kubernetes
+	*/
 	if err := s.initConfigController(args); err != nil {
 		return fmt.Errorf("error initializing config controller: %v", err)
 	}

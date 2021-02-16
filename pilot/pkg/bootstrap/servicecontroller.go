@@ -62,6 +62,10 @@ func (s *Server) initServiceControllers(args *PilotArgs) error {
 		}
 	}
 
+	/*
+		初始化Kubernetes 集群外部的服务，这些服务是通过 ServiceEntry 注册到控制面的，所有 ServiceEntry 配置数据目前还都在之前初始化的
+		configController 配置中心控制器中，这里将 ServiceEntry 数据单独拎出来初始化一个 ServicEntry 注册中心，加入到 serviceControllers 中
+	*/
 	s.serviceEntryStore = serviceentry.NewServiceDiscovery(s.configController, s.environment.IstioConfigStore, s.EnvoyXdsServer)
 	serviceControllers.AddRegistry(s.serviceEntryStore)
 
@@ -77,6 +81,7 @@ func (s *Server) initServiceControllers(args *PilotArgs) error {
 
 	// Defer running of the service controllers.
 	s.addStartFunc(func(stop <-chan struct{}) error {
+		// 把所有的服务注册中心的 Controller 的启动函数都注册到 startFuncs 中
 		go serviceControllers.Run(stop)
 		return nil
 	})
