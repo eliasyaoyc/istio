@@ -166,8 +166,11 @@ func (s *DiscoveryServer) edsIncremental(version string, req *model.PushRequest)
 // It replaces InstancesByPort in model - instead of iterating over all endpoints it uses
 // the hostname-keyed map. And it avoids the conversion from Endpoint to ServiceEntry to envoy
 // on each step: instead the conversion happens once, when an endpoint is first discovered.
+// EnvoyXdsServer 处理 EDS 的更新请求。 首先会判断是否是全量还是增量下发，
+// 然后创建 PushRequest 发送至 EnvoyXdsServer 统一用来接收推送请求的 pushChannel
 func (s *DiscoveryServer) EDSUpdate(clusterID, serviceName string, namespace string,
 	istioEndpoints []*model.IstioEndpoint) error {
+	// 判断是否是全量下发
 	inboundEDSUpdates.Increment()
 	// Update the eds data structures and trigger a push.
 	fp := s.edsUpdate(clusterID, serviceName, namespace, istioEndpoints)

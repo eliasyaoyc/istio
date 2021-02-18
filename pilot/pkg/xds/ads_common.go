@@ -60,6 +60,7 @@ func ConfigAffectsProxy(pushEv *Event, proxy *model.Proxy) bool {
 	return false
 }
 
+// 检测代理依赖的配置文件
 func checkProxyDependencies(proxy *model.Proxy, config model.ConfigKey) bool {
 	// Detailed config dependencies check.
 	switch proxy.Type {

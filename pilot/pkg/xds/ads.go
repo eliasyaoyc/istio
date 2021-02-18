@@ -315,6 +315,7 @@ func (s *DiscoveryServer) StreamAggregatedResources(stream discovery.AggregatedD
 				return err
 			}
 
+		// 这里用来处理 doSendPushes 方法中推送给 Envoy 事件的 channel
 		case pushEv := <-con.pushChannel:
 			// It is called when config changes.
 			// This is not optimized yet - we should detect what changed based on event and only
@@ -610,6 +611,7 @@ func (s *DiscoveryServer) DeltaAggregatedResources(stream discovery.AggregatedDi
 // for large configs. The method will hold a lock on con.pushMutex.
 func (s *DiscoveryServer) pushConnection(con *Connection, pushEv *Event) error {
 	// TODO: update the service deps based on NetworkScope
+	// 通过 ProxyNeedsPush 判断代理是否需要推送，判断的逻辑主要是检查推送事件 pushEv 的 configsUpdated 是否和代理相关
 	if !pushEv.full {
 		if !ProxyNeedsPush(con.node, pushEv) {
 			adsLog.Debugf("Skipping EDS push to %v, no updates required", con.ConID)

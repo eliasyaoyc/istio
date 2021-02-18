@@ -472,6 +472,7 @@ func (ilw *IstioEgressListenerWrapper) VirtualServices() []Config {
 
 // DependsOnConfig determines if the proxy depends on the given config.
 // Returns whether depends on this config or this kind of config is not scoped(unknown to be depended) here.
+// 这个sidecar 不是 数据平面的 边车模式，而是 Istio 的一种流控配置
 func (sc *SidecarScope) DependsOnConfig(config ConfigKey) bool {
 	if sc == nil {
 		return true

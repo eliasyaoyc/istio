@@ -59,19 +59,20 @@ type configKey struct {
 
 // ServiceEntryStore communicates with ServiceEntry CRDs and monitors for changes
 type ServiceEntryStore struct { // nolint:golint
-	XdsUpdater model.XDSUpdater
-	store      model.IstioConfigStore
+	XdsUpdater model.XDSUpdater       // 用来接受 EnvoyXdsServer 的接口，主要用来 Push 相应的 xDS 更新请求
+	store      model.IstioConfigStore // 保存 ServiceEntry 实例的地方
 
-	storeMutex sync.RWMutex
+	storeMutex sync.RWMutex // 读写 Store 时需要的锁
 
 	ip2instance map[string][]*model.ServiceInstance
-	// Endpoints table
+	// Endpoints table 以 hostname/namespace 以及类型（是服务还是实例）等做为索引的服务实例表
 	instances map[instancesKey]map[configKey][]*model.ServiceInstance
 	// workload instances from kubernetes pods - map of ip -> workload instance
 	workloadInstancesByIP map[string]*model.WorkloadInstance
 	// Stores a map of workload instance name/namespace to address
 	workloadInstancesIPsByName map[string]string
 	// seWithSelectorByNamespace keeps track of ServiceEntries with selectors, keyed by namespaces
+	// 保存了每个 namespace 里所有的 ServiceEntry，也是做为一个索引供 handler 使用
 	seWithSelectorByNamespace map[string][]servicesWithEntry
 	changeMutex               sync.RWMutex
 	refreshIndexes            bool
@@ -90,6 +91,9 @@ func NewServiceDiscovery(configController model.ConfigStoreCache, store model.Is
 		workloadInstancesIPsByName: map[string]string{},
 		refreshIndexes:             true,
 	}
+	// 往 ConfigController 注册 ServiceEntry 和 WorkloadEntry 的事件 Handler.
+	// 即当 ConfigController 监听到资源变化的时候，就会调用这两个Handler 来处理事件了。
+	// 这两个 Handler 的目的都是向 EnvoyXdsServer 推送相应的 xDS 资源变化
 	if configController != nil {
 		configController.RegisterEventHandler(gvk.ServiceEntry, s.serviceEntryHandler)
 		configController.RegisterEventHandler(gvk.WorkloadEntry, s.workloadEntryHandler)
@@ -101,6 +105,7 @@ func NewServiceDiscovery(configController model.ConfigStoreCache, store model.Is
 // kube registry controller also calls this function indirectly via the Share interface
 // When invoked via the kube registry controller, the old object is nil as the registry
 // controller does its own deduping and has no notion of object versions
+// WorkloadEntry 变化时的处理逻辑，管理外部服务实例的对象
 func (s *ServiceEntryStore) workloadEntryHandler(old, curr model.Config, event model.Event) {
 	wle := curr.Spec.(*networking.WorkloadEntry)
 	key := configKey{
@@ -121,6 +126,7 @@ func (s *ServiceEntryStore) workloadEntryHandler(old, curr model.Config, event m
 
 	s.storeMutex.RLock()
 	// We will only select entries in the same namespace
+	// 获取当前 namespace 下所有的 ServiceEntry
 	entries := s.seWithSelectorByNamespace[curr.Namespace]
 	s.storeMutex.RUnlock()
 
@@ -130,22 +136,28 @@ func (s *ServiceEntryStore) workloadEntryHandler(old, curr model.Config, event m
 	}
 	log.Debugf("Handle event %s for workload entry %s in namespace %s", event, curr.Name, curr.Namespace)
 	instances := []*model.ServiceInstance{}
+
+	// 遍历它们并与 WorkloadEntry 的 Label 进行比对，确定是关联的服务后，依据获取的服务创建 ServiceInstance 。
+	// ServiceInstance 是 Pilot 抽象出的描述具体服务对应实例的结构
 	for _, se := range entries {
 		workloadLabels := labels.Collection{wle.Labels}
 		if !workloadLabels.IsSupersetOf(se.entry.WorkloadSelector.Labels) {
 			// Not a match, skip this one
 			continue
 		}
+		// 转换成 ServiceInstance， 并加入集合
 		instance := convertWorkloadEntryToServiceInstances(wle, se.services, se.entry)
 		instances = append(instances, instance...)
 	}
 
+	// 创建了新的 ServiceInstance 后，需要及时更新实例的索引表 s.instances
 	if event != model.EventDelete {
 		s.updateExistingInstances(key, instances)
 	} else {
 		s.deleteExistingInstances(key, instances)
 	}
 
+	// 将新创建的 ServiceInstance 传入 ServiceEntryStore 专门处理 EDS 的函数
 	s.edsUpdate(instances)
 	// trigger full xds push to the related sidecar proxy
 	if event == model.EventAdd {
@@ -154,6 +166,8 @@ func (s *ServiceEntryStore) workloadEntryHandler(old, curr model.Config, event m
 }
 
 // serviceEntryHandler defines the handler for service entries
+// serviceEntryHandler 会将 ServiceEntry 转化为一组 Pilot 内部抽象的服务，每个不同的 Hosts 、 Address 都会对应一个 Service ，
+// 并且初始化一个名为 configsUpdated 的 map 来保存是否有 ServiceEntry 需要更新，以及创建了多个 slice 分别保存该新增、删除、更新和没有变化的服务
 func (s *ServiceEntryStore) serviceEntryHandler(old, curr model.Config, event model.Event) {
 	cs := convertServices(curr)
 	configsUpdated := map[model.ConfigKey]struct{}{}
@@ -483,6 +497,8 @@ func (s *ServiceEntryStore) ResyncEDS() {
 func (s *ServiceEntryStore) edsUpdate(instances []*model.ServiceInstance) {
 	// must call it here to refresh s.instances if necessary
 	// otherwise may get no instances or miss some new addes instances
+	// 刷新一遍索引表，此方法能避免其他协程的工作导致索引表更新不及时
+	// TODO 这里有一个一问，refresh 是否是多次一句，因为它做了一些初始化后，又调用了 edsUpdateByKeys 这个方法此方法也会refresh 一下？
 	s.maybeRefreshIndexes()
 	// Find all keys we need to lookup
 	keys := map[instancesKey]struct{}{}
@@ -495,10 +511,12 @@ func (s *ServiceEntryStore) edsUpdate(instances []*model.ServiceInstance) {
 func (s *ServiceEntryStore) edsUpdateByKeys(keys map[instancesKey]struct{}) {
 	// must call it here to refresh s.instances if necessary
 	// otherwise may get no instances or miss some new addess instances
+	// 刷新一遍索引表，此方法能避免其他协程的工作导致索引表更新不及时，完成后开启读锁
 	s.maybeRefreshIndexes()
 	allInstances := []*model.ServiceInstance{}
 	s.storeMutex.RLock()
 	for key := range keys {
+		// 从更新好的索引表 s.instances查找我们要处理的实例
 		for _, i := range s.instances[key] {
 			allInstances = append(allInstances, i...)
 		}
@@ -506,6 +524,7 @@ func (s *ServiceEntryStore) edsUpdateByKeys(keys map[instancesKey]struct{}) {
 	s.storeMutex.RUnlock()
 
 	// This was a delete
+	// 如果是删除事件，先前更新索引表的时候已经删除了，所以这里查不到 allInstances的，直接向 EnvoyXdsServer 发送删除 EDS 的请求
 	if len(allInstances) == 0 {
 		for k := range keys {
 			_ = s.XdsUpdater.EDSUpdate(s.Cluster(), string(k.hostname), k.namespace, nil)
@@ -532,6 +551,7 @@ func (s *ServiceEntryStore) edsUpdateByKeys(keys map[instancesKey]struct{}) {
 			})
 	}
 
+	// 如果有实例更新则直接发送 EDS 的请求
 	for k, eps := range endpoints {
 		_ = s.XdsUpdater.EDSUpdate(s.Cluster(), string(k.hostname), k.namespace, eps)
 	}

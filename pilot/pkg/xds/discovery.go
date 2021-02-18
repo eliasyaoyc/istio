@@ -71,7 +71,7 @@ func init() {
 // DiscoveryServer is Pilot's gRPC implementation for Envoy's v2 xds APIs
 type DiscoveryServer struct {
 	// Env is the model environment. pilot server 中的 Environment
-	Env *model.Environment
+	Env *model.Environment // 与 Pilot Server 中的 Environment 一样
 
 	// MemRegistry is used for debug and load testing, allow adding services. Visible for testing.
 	// 控制面 Istio 配置的生成器，如 VirtualService、DestinationService 等
@@ -82,7 +82,7 @@ type DiscoveryServer struct {
 
 	// ConfigGenerator is responsible for generating data plane configuration using Istio networking
 	// APIs and service registry info
-	ConfigGenerator core.ConfigGenerator
+	ConfigGenerator core.ConfigGenerator // xDS 数据的生成器接口
 
 	// Generators allow customizing the generated config, based on the client metadata.
 	// Key is the generator type - will match the Generator metadata to set the per-connection
@@ -106,16 +106,17 @@ type DiscoveryServer struct {
 	// incremental updates. This is keyed by service and namespace
 	// 不同服务所有实例的集合，增量更新，key 为 service 和 namespace
 	// EndpointShards 中是以不同的注册中心名为 key 分组保存实例
+	// Endpoint 的缓存，以服务名和 namespace 作为索引，主要用于 EDS 更新
 	EndpointShardsByService map[string]map[string]*EndpointShards
 
-	// 接受 push 请求的 channel
+	// 统一接收其他组件发来的 PushRequest 的 channel
 	pushChannel chan *model.PushRequest
 
 	// mutex used for config update scheduling (former cache update mutex)
 	updateMutex sync.RWMutex
 
 	// pushQueue is the buffer that used after debounce and before the real xds push.
-	// 防抖之后，真正 Push xDS 之前所用的缓冲队列
+	// pushQueue 主要是在真正 xDS 推送前做防抖缓存
 	pushQueue *PushQueue
 
 	// debugHandlers is the list of all the supported debug handlers.
@@ -219,8 +220,10 @@ func (s *DiscoveryServer) IsServerReady() bool {
 
 func (s *DiscoveryServer) Start(stopCh <-chan struct{}) {
 	adsLog.Infof("Starting ADS server")
+	// handleUpdates 防抖，避免因过快的推送带来的问题和压力
 	go s.handleUpdates(stopCh)
 	go s.periodicRefreshMetrics(stopCh)
+	// 真正发送 PushRequest 的协程
 	go s.sendPushes(stopCh)
 }
 
@@ -275,8 +278,14 @@ func (s *DiscoveryServer) periodicRefreshMetrics(stopCh <-chan struct{}) {
 // Push is called to push changes on config updates using ADS. This is set in DiscoveryService.Push,
 // to avoid direct dependencies.
 func (s *DiscoveryServer) Push(req *model.PushRequest) {
+	/*
+		先处理了不是全量推送的请求 if !req.Full ，结合之前分析所有 PushRequest 的来源可知， Full=false 只在 EDSUpdate 的时候才有可能推送，
+		在 ServiceEntryStore 里的 workloadEntryHandler，EDS 的变化不需要更新 PushContext ，所以这里获取了全局的 globalPushContext 后就直接处理了。
+		PushContext  里定义了大量岁 Service、VirtualService 等缓存，当服务发生变化时，必须要更新，而EDS 的增量推送则不用。
+	*/
 	if !req.Full {
 		req.Push = s.globalPushContext()
+		// 把 PushRequest 重新放入 DiscoveryServer.pushQueue 中
 		s.AdsPushAll(versionInfo(), req)
 		return
 	}
@@ -360,10 +369,12 @@ func debounce(ch chan *model.PushRequest, stopCh <-chan struct{}, pushFn func(re
 		freeCh <- struct{}{}
 	}
 
+	// 防抖的主要逻辑
 	pushWorker := func() {
 		eventDelay := time.Since(startDebounce)
 		quietTime := time.Since(lastConfigUpdateTime)
 		// it has been too long or quiet enough
+		// 当前时间 >= 最大延迟时间  或 当前时间 >= 最小静默时间
 		if eventDelay >= debounceMax || quietTime >= debounceAfter {
 			if req != nil {
 				pushCounter++
@@ -372,6 +383,7 @@ func debounce(ch chan *model.PushRequest, stopCh <-chan struct{}, pushFn func(re
 					quietTime, eventDelay, req.Full)
 
 				free = false
+				// 执行 push 方法
 				go push(req)
 				req = nil
 				debouncedEvents = 0
@@ -381,6 +393,7 @@ func debounce(ch chan *model.PushRequest, stopCh <-chan struct{}, pushFn func(re
 		}
 	}
 
+	// 等待各个 channel 的逻辑
 	for {
 		select {
 		case <-freeCh:
@@ -399,13 +412,21 @@ func debounce(ch chan *model.PushRequest, stopCh <-chan struct{}, pushFn func(re
 
 			lastConfigUpdateTime = time.Now()
 			if debouncedEvents == 0 {
+				// 当收到第一个 PushRequest 的时候，通过延迟器 timeChan 先延迟一个最小静默时间（100 毫秒）
+				// 期间接受到的请求直接 merge，同时累加已防抖的事件个数。
 				timeChan = time.After(debounceAfter)
 				startDebounce = lastConfigUpdateTime
 			}
 			debouncedEvents++
 
+			// 合并 PushRequest
 			req = req.Merge(r)
+
+		// 在上面的分支等待最小静默时间结束后，会进入此分支
 		case <-timeChan:
+			// 判断是否有正在执行的防抖过程，没有的话就执行 pushWorker 做一次防抖判断看是否需要推送.
+			// 如果第一个请求的延迟时间还没有超过最大延迟时间（10 秒钟）并且距离处理上一次 PushRequest 的时间不足最小静默时间（100 毫秒），
+			// 则继续延时，等待 debouncedAfter - quietTime 也就是不足最小静默时间的部分，再进行下一次 pushWorker() 操作。
 			if free {
 				pushWorker()
 			}
@@ -426,6 +447,8 @@ func doSendPushes(stopCh <-chan struct{}, semaphore chan struct{}, queue *PushQu
 			semaphore <- struct{}{}
 
 			// Get the next proxy to push. This will block if there are no updates required.
+			// 通过 Dequeue 方法获取需要处理的代理客户端和对应的 PushRequest，再根据 PushRequest 生成Event 传入客户端的 pushChannel 中
+			// 与 EnvoyXdsServer 的 pushChannel 不同（用来接受server、config controller 发过来的pushRequest），这里的是针对当前客户端连接的 pushChannel
 			client, info := queue.Dequeue()
 			recordPushTriggers(info.Reason...)
 			// Signals that a push is done by reading from the semaphore, allowing another send on it.
@@ -447,6 +470,7 @@ func doSendPushes(stopCh <-chan struct{}, semaphore chan struct{}, queue *PushQu
 				}
 
 				select {
+				// 在 StreamAggregatedResources 方法中处理
 				case client.pushChannel <- pushEv:
 					return
 				case <-client.stream.Context().Done(): // grpc stream was closed
@@ -479,6 +503,7 @@ func (s *DiscoveryServer) initPushContext(req *model.PushRequest, oldPushContext
 	return push, nil
 }
 
+// 这里的 concurrentPushLimit 节流参数，是由环境变量 PILOT_PUSH_THROTTLE 控制的 默认100
 func (s *DiscoveryServer) sendPushes(stopCh <-chan struct{}) {
 	doSendPushes(stopCh, s.concurrentPushLimit, s.pushQueue)
 }
