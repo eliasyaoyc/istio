@@ -100,6 +100,8 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 	// it generates a self-signed key/cert pair and write it to CASecret.
 	// For subsequent restart, CA will reads key/cert from CASecret.
 	caSecret, scrtErr := client.Secrets(namespace).Get(context.TODO(), CASecret, metav1.GetOptions{})
+
+	// 如果失败，并且重试间隔时间参数有设置，则进入重试，这里只有两种情况会退出死循环，成功读取到 CASecret 或者 context 超时，直接return； 否则就是一直死循环
 	if scrtErr != nil && readCertRetryInterval > time.Duration(0) {
 		pkiCaLog.Infof("Citadel in signing key/cert read only mode. Wait until secret %s:%s can be loaded...", namespace, CASecret)
 		ticker := time.NewTicker(readCertRetryInterval)
@@ -134,6 +136,11 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 			client:             client,
 		},
 	}
+
+	// 到这里，只有两种情况：
+	// 1. scrtErr 是 nil 也就是说 caSecret 成功获取到了
+	// 2. srctErr 不是 nil，也就是说 没有设置重试时间这个参数
+	// 显然在这里 if 条件中只满足了第二种情况，这里会生成ca
 	if scrtErr != nil {
 		pkiCaLog.Infof("Failed to get secret (error: %s), will create one", scrtErr)
 
@@ -145,6 +152,7 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 			RSAKeySize:   caRSAKeySize,
 			IsDualUse:    dualUse,
 		}
+		// 生成 cert 和 key
 		pemCert, pemKey, ckErr := util.GenCertKeyFromOptions(options)
 		if ckErr != nil {
 			return nil, fmt.Errorf("unable to generate CA cert and key for self-signed CA (%v)", ckErr)
@@ -155,11 +163,13 @@ func NewSelfSignedIstioCAOptions(ctx context.Context,
 			return nil, fmt.Errorf("failed to append root certificates (%v)", err)
 		}
 
+		// 构建 keyCertBundle
 		if caOpts.KeyCertBundle, err = util.NewVerifiedKeyCertBundleFromPem(pemCert, pemKey, nil, rootCerts); err != nil {
 			return nil, fmt.Errorf("failed to create CA KeyCertBundle (%v)", err)
 		}
 
 		// Write the key/cert back to secret so they will be persistent when CA restarts.
+		// 存到k8s中，之后ca重启就可以直接读取
 		secret := k8ssecret.BuildSecret("", CASecret, namespace, nil, nil, nil, pemCert, pemKey, istioCASecretType)
 		if _, err = client.Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
 			pkiCaLog.Errorf("Failed to write secret to CA (error: %s). Abort.", err)

@@ -247,11 +247,13 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	}
 
 	// CA signing certificate must be created first if needed.
+	// 从这里开始 先进行初始化 istio ca 功能 和 公钥文件（只是创建相关文件，并不会写入具体的值）
 	if err := s.maybeCreateCA(caOpts); err != nil {
 		return nil, err
 	}
 
 	// Create Istiod certs and setup watches.
+	// DNS 证书部分
 	if err := s.initIstiodCerts(args, string(istiodHost)); err != nil {
 		return nil, err
 	}
@@ -262,11 +264,13 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	}
 
 	// Secure gRPC Server must be initialized after CA is created as may use a Citadel generated cert.
+	// 初始化 SDS server
 	if err := s.initSecureDiscoveryService(args); err != nil {
 		return nil, fmt.Errorf("error initializing secure gRPC Listener: %v", err)
 	}
 
 	// common https server for webhooks (e.g. injection, validation)
+	// 简单的判断是否 secure server 启动成功
 	s.initSecureWebhookServer(args)
 
 	wh, err := s.initSidecarInjector(args)
@@ -302,9 +306,11 @@ func NewServer(args *PilotArgs) (*Server, error) {
 		return nil, fmt.Errorf("error initializing cluster registries: %v", err)
 	}
 
+	// 这是 Chiron， 比Citadel 更轻量级，用于 DNS Cert
 	s.initDNSServer(args)
 
 	// Start CA. This should be called after CA and Istiod certs have been created.
+	// 开启 Citadel, 这是 Istio 中 Certificate Authority, 用来进行 mutual tls authentication 和 authorization
 	s.startCA(caOpts)
 
 	s.initNamespaceController(args)

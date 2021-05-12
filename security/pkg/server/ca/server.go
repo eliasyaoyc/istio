@@ -48,6 +48,7 @@ const (
 var serverCaLog = log.RegisterScope("serverca", "Citadel server log", 0)
 
 // CertificateAuthority contains methods to be supported by a CA.
+// 证书颁发机构
 type CertificateAuthority interface {
 	// Sign generates a certificate for a workload or CA, from the given CSR and TTL.
 	// TODO(myidpt): simplify this interface and pass a struct with cert field values instead.
@@ -61,15 +62,19 @@ type CertificateAuthority interface {
 // Server implements IstioCAService and IstioCertificateService and provides the services on the
 // specified port.
 type Server struct {
-	monitoring     monitoringMetrics
+	monitoring monitoringMetrics
+	// 身份校验器
 	Authenticators []authenticate.Authenticator
 	hostnames      []string
-	ca             CertificateAuthority
-	serverCertTTL  time.Duration
-	certificate    *tls.Certificate
-	port           int
-	forCA          bool
-	grpcServer     *grpc.Server
+	// 证书颁发机构
+	ca CertificateAuthority
+	// 证书有效时间
+	serverCertTTL time.Duration
+	// 证书
+	certificate *tls.Certificate
+	port        int
+	forCA       bool
+	grpcServer  *grpc.Server
 }
 
 func getConnectionAddress(ctx context.Context) string {
@@ -81,7 +86,7 @@ func getConnectionAddress(ctx context.Context) string {
 	return peerAddr
 }
 
-// CreateCertificate handles an incoming certificate signing request (CSR). It does
+// CreateCertificate handles an incoming certificate signing request (CSR 证书签名请求). It does
 // authentication and authorization. Upon validated, signs a certificate that:
 // the SAN is the identity of the caller in authentication result.
 // the subject public key is the public key in the CSR.
@@ -193,11 +198,13 @@ func NewWithGRPC(grpc *grpc.Server, ca CertificateAuthority, ttl time.Duration, 
 	// Notice that the order of authenticators matters, since at runtime
 	// authenticators are activated sequentially and the first successful attempt
 	// is used as the authentication result.
+	// 证书身份认证器集合 默认是 ClientCertAuthenticator
 	authenticators := []authenticate.Authenticator{&authenticate.ClientCertAuthenticator{}}
 	serverCaLog.Info("added client certificate authenticator")
 
 	// Only add k8s jwt authenticator if SDS is enabled.
 	if sdsEnabled {
+		// 当启动 sds 的时候，会添加 jwt 认证器
 		authenticator := authenticate.NewKubeJWTAuthenticator(kubeClient, clusterID, remoteKubeClientGetter,
 			trustDomain, jwtPolicy)
 		authenticators = append(authenticators, authenticator)

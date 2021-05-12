@@ -306,16 +306,20 @@ func (s *Server) createIstioCA(client corev1.CoreV1Interface, opts *CAOptions) (
 	var caOpts *ca.IstioCAOptions
 	var err error
 
+	// 获取 workload 证书最大的过期时间 MAX_WORKLOAD_CERT_TTL ，默认是 90 * 24 * time.Hour （90天）
 	maxCertTTL := maxWorkloadCertTTL.Get()
+	// 获取自生成证书的过期时间 CITADEL_SELF_SIGNED_CA_CERT_TTL，默认是是 3650 * 24 * time.Hour（10年）
 	if SelfSignedCACertTTL.Get().Seconds() > maxCertTTL.Seconds() {
 		maxCertTTL = SelfSignedCACertTTL.Get()
 	}
 
 	// In pods, this is the optional 'cacerts' Secret.
 	// TODO: also check for key.pem ( for interop )
+	// ca key 的路径，默认 ./etc/cacerts/ca-key.pem
 	signingKeyFile := path.Join(LocalCertDir.Get(), "ca-key.pem")
 
 	// If not found, will default to ca-cert.pem. May contain multiple roots.
+	// root-cert 的路径，默认 ./etc/cacerts/root-cert.pem
 	rootCertFile := path.Join(LocalCertDir.Get(), "root-cert.pem")
 	if _, err := os.Stat(rootCertFile); err != nil {
 		// In Citadel, normal self-signed doesn't use a root-cert.pem file for additional roots.
