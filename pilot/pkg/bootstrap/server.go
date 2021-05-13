@@ -238,6 +238,7 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	}
 
 	s.initGenerators()
+	// 初始化 jwt authorization
 	s.initJwtPolicy()
 
 	// Options based on the current 'defaults' in istio.
